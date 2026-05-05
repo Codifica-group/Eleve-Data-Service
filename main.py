@@ -236,6 +236,34 @@ def obter_conexao_banco():
         conexao.close()
 
 
+def obter_colunas_tabela(conexao: sqlite3.Connection, tabela: str) -> set[str]:
+    return {
+        linha["name"]
+        for linha in conexao.execute(f"PRAGMA table_info({tabela})").fetchall()
+    }
+
+
+def garantir_colunas_racas_externas(conexao: sqlite3.Connection) -> None:
+    colunas_existentes = obter_colunas_tabela(conexao, "racas_externas")
+    colunas_esperadas = {
+        "nome_original": "TEXT",
+        "nome_alternativo": "TEXT",
+        "peso_imperial": "TEXT",
+        "altura_imperial": "TEXT",
+        "origem_raca": "TEXT",
+        "criado_para": "TEXT",
+        "referencia_imagem_id": "TEXT",
+        "imagem_url": "TEXT",
+        "descricao": "TEXT",
+    }
+
+    for coluna, definicao in colunas_esperadas.items():
+        if coluna not in colunas_existentes:
+            conexao.execute(
+                f"ALTER TABLE racas_externas ADD COLUMN {coluna} {definicao}"
+            )
+
+
 def inicializar_banco() -> None:
     with obter_conexao_banco() as conexao:
         conexao.execute(
@@ -264,16 +292,26 @@ def inicializar_banco() -> None:
             CREATE TABLE IF NOT EXISTS racas_externas (
                 id_raca INTEGER PRIMARY KEY,
                 nome TEXT NOT NULL,
+                nome_original TEXT,
+                nome_alternativo TEXT,
                 grupo TEXT,
                 temperamento TEXT,
                 expectativa_vida TEXT,
                 peso_metrico TEXT,
+                peso_imperial TEXT,
                 altura_metrica TEXT,
+                altura_imperial TEXT,
                 origem TEXT DEFAULT 'TheDogAPI',
+                origem_raca TEXT,
+                criado_para TEXT,
+                referencia_imagem_id TEXT,
+                imagem_url TEXT,
+                descricao TEXT,
                 atualizado_em TEXT NOT NULL
             )
             """
         )
+        garantir_colunas_racas_externas(conexao)
 
         conexao.execute(
             """
