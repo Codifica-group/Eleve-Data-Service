@@ -395,33 +395,9 @@ def mesclar_banco_legado_se_necessario() -> None:
 
                 try:
                     for linha in origem.execute("SELECT * FROM racas_externas"):
-                        destino.execute(
-                            """
-                            INSERT INTO racas_externas (
-                                id_raca, nome, grupo, temperamento, expectativa_vida,
-                                peso_metrico, altura_metrica, origem, atualizado_em
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT(id_raca) DO UPDATE SET
-                                nome=excluded.nome,
-                                grupo=excluded.grupo,
-                                temperamento=excluded.temperamento,
-                                expectativa_vida=excluded.expectativa_vida,
-                                peso_metrico=excluded.peso_metrico,
-                                altura_metrica=excluded.altura_metrica,
-                                origem=excluded.origem,
-                                atualizado_em=excluded.atualizado_em
-                            """,
-                            (
-                                linha["id_raca"],
-                                linha["nome"],
-                                linha["grupo"],
-                                linha["temperamento"],
-                                linha["expectativa_vida"],
-                                linha["peso_metrico"],
-                                linha["altura_metrica"],
-                                linha["origem"],
-                                linha["atualizado_em"],
-                            ),
+                        salvar_raca_externa(
+                            destino,
+                            montar_dados_raca_externa_da_linha(linha),
                         )
                         total_racas_externas += 1
                 except sqlite3.OperationalError:
@@ -468,6 +444,10 @@ def mesclar_banco_legado_se_necessario() -> None:
                                 linha["referencia_imagem_id"],
                                 linha["atualizado_em"],
                             ),
+                        )
+                        salvar_raca_externa(
+                            destino,
+                            montar_dados_raca_externa_da_linha(linha),
                         )
                         total_cache += 1
                 except sqlite3.OperationalError:
@@ -599,6 +579,167 @@ def linha_possui_dados_uteis(linha: Optional[sqlite3.Row]) -> bool:
     return False
 
 
+def obter_valor_coluna(linha, coluna: str, padrao=None):
+    if linha is None:
+        return padrao
+
+    try:
+        if coluna in linha.keys():
+            valor = linha[coluna]
+            return padrao if valor is None else valor
+    except AttributeError:
+        pass
+
+    if isinstance(linha, dict) and coluna in linha:
+        valor = linha[coluna]
+        return padrao if valor is None else valor
+
+    return padrao
+
+
+def montar_dados_raca_externa_do_item(item: dict) -> dict:
+    return {
+        "id_raca": item.get("id"),
+        "nome": normalizar_texto(item.get("name"), padrao="Raca sem nome"),
+        "nome_original": normalizar_texto(item.get("name"), padrao="Raca sem nome"),
+        "nome_alternativo": normalizar_texto(item.get("alt_names")),
+        "grupo": normalizar_texto(item.get("breed_group")),
+        "temperamento": normalizar_texto(item.get("temperament")),
+        "expectativa_vida": normalizar_texto(item.get("life_span")),
+        "peso_metrico": normalizar_texto((item.get("weight") or {}).get("metric")),
+        "peso_imperial": normalizar_texto((item.get("weight") or {}).get("imperial")),
+        "altura_metrica": normalizar_texto((item.get("height") or {}).get("metric")),
+        "altura_imperial": normalizar_texto((item.get("height") or {}).get("imperial")),
+        "origem": "TheDogAPI",
+        "origem_raca": normalizar_texto(item.get("origin")),
+        "criado_para": normalizar_texto(item.get("bred_for")),
+        "referencia_imagem_id": normalizar_texto(item.get("reference_image_id")),
+        "imagem_url": normalizar_texto((item.get("image") or {}).get("url")),
+        "descricao": normalizar_texto(item.get("description")),
+        "atualizado_em": agora_utc_iso(),
+    }
+
+
+def montar_dados_raca_externa_da_linha(linha) -> dict:
+    return {
+        "id_raca": obter_valor_coluna(linha, "id_raca", obter_valor_coluna(linha, "id_dog_api")),
+        "nome": normalizar_texto(obter_valor_coluna(linha, "nome"), padrao="Raca sem nome"),
+        "nome_original": normalizar_texto(
+            obter_valor_coluna(linha, "nome_original", obter_valor_coluna(linha, "nome")),
+            padrao="Raca sem nome",
+        ),
+        "nome_alternativo": normalizar_texto(obter_valor_coluna(linha, "nome_alternativo")),
+        "grupo": normalizar_texto(obter_valor_coluna(linha, "grupo")),
+        "temperamento": normalizar_texto(obter_valor_coluna(linha, "temperamento")),
+        "expectativa_vida": normalizar_texto(obter_valor_coluna(linha, "expectativa_vida")),
+        "peso_metrico": normalizar_texto(obter_valor_coluna(linha, "peso_metrico")),
+        "peso_imperial": normalizar_texto(obter_valor_coluna(linha, "peso_imperial")),
+        "altura_metrica": normalizar_texto(obter_valor_coluna(linha, "altura_metrica")),
+        "altura_imperial": normalizar_texto(obter_valor_coluna(linha, "altura_imperial")),
+        "origem": normalizar_texto(obter_valor_coluna(linha, "origem"), padrao="TheDogAPI"),
+        "origem_raca": normalizar_texto(
+            obter_valor_coluna(linha, "origem_raca", obter_valor_coluna(linha, "origem")),
+        ),
+        "criado_para": normalizar_texto(obter_valor_coluna(linha, "criado_para")),
+        "referencia_imagem_id": normalizar_texto(obter_valor_coluna(linha, "referencia_imagem_id")),
+        "imagem_url": normalizar_texto(obter_valor_coluna(linha, "imagem_url")),
+        "descricao": normalizar_texto(obter_valor_coluna(linha, "descricao")),
+        "atualizado_em": normalizar_texto(obter_valor_coluna(linha, "atualizado_em"), padrao=agora_utc_iso()),
+    }
+
+
+def salvar_raca_externa(conexao: sqlite3.Connection, dados: dict) -> None:
+    id_raca = dados.get("id_raca")
+    if id_raca is None:
+        return
+
+    conexao.execute(
+        """
+        INSERT INTO racas_externas (
+            id_raca, nome, nome_original, nome_alternativo, grupo, temperamento,
+            expectativa_vida, peso_metrico, peso_imperial, altura_metrica,
+            altura_imperial, origem, origem_raca, criado_para,
+            referencia_imagem_id, imagem_url, descricao, atualizado_em
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id_raca) DO UPDATE SET
+            nome=excluded.nome,
+            nome_original=excluded.nome_original,
+            nome_alternativo=excluded.nome_alternativo,
+            grupo=excluded.grupo,
+            temperamento=excluded.temperamento,
+            expectativa_vida=excluded.expectativa_vida,
+            peso_metrico=excluded.peso_metrico,
+            peso_imperial=excluded.peso_imperial,
+            altura_metrica=excluded.altura_metrica,
+            altura_imperial=excluded.altura_imperial,
+            origem=excluded.origem,
+            origem_raca=excluded.origem_raca,
+            criado_para=excluded.criado_para,
+            referencia_imagem_id=excluded.referencia_imagem_id,
+            imagem_url=excluded.imagem_url,
+            descricao=excluded.descricao,
+            atualizado_em=excluded.atualizado_em
+        """,
+        (
+            id_raca,
+            dados["nome"],
+            dados["nome_original"],
+            dados["nome_alternativo"],
+            dados["grupo"],
+            dados["temperamento"],
+            dados["expectativa_vida"],
+            dados["peso_metrico"],
+            dados["peso_imperial"],
+            dados["altura_metrica"],
+            dados["altura_imperial"],
+            dados["origem"],
+            dados["origem_raca"],
+            dados["criado_para"],
+            dados["referencia_imagem_id"],
+            dados["imagem_url"],
+            dados["descricao"],
+            dados["atualizado_em"],
+        ),
+    )
+
+
+def montar_resposta_info_raca(nome_consultado: str, linha, fonte_padrao: str) -> dict:
+    race_id = obter_valor_coluna(linha, "id_raca", obter_valor_coluna(linha, "id_dog_api"))
+    nome_base = normalizar_texto(
+        obter_valor_coluna(linha, "nome"),
+        padrao=nome_consultado,
+    )
+    nome_externo = normalizar_texto(
+        obter_valor_coluna(linha, "nome_original", nome_base),
+        padrao=nome_base,
+    )
+
+    return {
+        "nome": nome_consultado,
+        "nomeExterno": nome_externo,
+        "grupo": normalizar_texto(obter_valor_coluna(linha, "grupo")),
+        "temperamento": normalizar_texto(obter_valor_coluna(linha, "temperamento")),
+        "expectativaVida": normalizar_texto(obter_valor_coluna(linha, "expectativa_vida")),
+        "peso": normalizar_texto(
+            obter_valor_coluna(linha, "peso", obter_valor_coluna(linha, "peso_metrico"))
+        ),
+        "pesoImperial": normalizar_texto(obter_valor_coluna(linha, "peso_imperial")),
+        "altura": normalizar_texto(
+            obter_valor_coluna(linha, "altura", obter_valor_coluna(linha, "altura_metrica"))
+        ),
+        "alturaImperial": normalizar_texto(obter_valor_coluna(linha, "altura_imperial")),
+        "origemRaca": normalizar_texto(
+            obter_valor_coluna(linha, "origem_raca", obter_valor_coluna(linha, "origem"))
+        ),
+        "proposito": normalizar_texto(obter_valor_coluna(linha, "criado_para")),
+        "referenciaImagemId": normalizar_texto(obter_valor_coluna(linha, "referencia_imagem_id")),
+        "imagemUrl": normalizar_texto(obter_valor_coluna(linha, "imagem_url")),
+        "descricao": normalizar_texto(obter_valor_coluna(linha, "descricao")),
+        "fonte": normalizar_texto(obter_valor_coluna(linha, "origem"), padrao=fonte_padrao),
+        "raceId": race_id,
+    }
+
+
 def buscar_melhor_correspondencia(nome: str, linhas: list[sqlite3.Row]) -> Optional[sqlite3.Row]:
     chave_normalizada = normalizar_chave_raca(nome)
     chave_canonica = obter_chave_canonica_raca(nome)
@@ -677,34 +818,7 @@ def inserir_ou_atualizar_raca(conexao: sqlite3.Connection, item: dict) -> None:
         return
 
     salvar_no_cache_dogapi(conexao, item)
-
-    conexao.execute(
-        """
-        INSERT INTO racas_externas (
-            id_raca, nome, grupo, temperamento, expectativa_vida,
-            peso_metrico, altura_metrica, origem, atualizado_em
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'TheDogAPI', ?)
-        ON CONFLICT(id_raca) DO UPDATE SET
-            nome=excluded.nome,
-            grupo=excluded.grupo,
-            temperamento=excluded.temperamento,
-            expectativa_vida=excluded.expectativa_vida,
-            peso_metrico=excluded.peso_metrico,
-            altura_metrica=excluded.altura_metrica,
-            origem=excluded.origem,
-            atualizado_em=excluded.atualizado_em
-        """,
-        (
-            id_raca,
-            normalizar_texto(item.get("name"), padrao="Raca sem nome"),
-            normalizar_texto(item.get("breed_group")),
-            normalizar_texto(item.get("temperament")),
-            normalizar_texto(item.get("life_span")),
-            normalizar_texto((item.get("weight") or {}).get("metric")),
-            normalizar_texto((item.get("height") or {}).get("metric")),
-            agora_utc_iso(),
-        ),
-    )
+    salvar_raca_externa(conexao, montar_dados_raca_externa_do_item(item))
 
 
 def salvar_raca_local(
@@ -764,12 +878,21 @@ def buscar_raca_no_cache_por_nome(nome: str) -> Optional[sqlite3.Row]:
             SELECT
                 id_dog_api AS id_raca,
                 nome,
+                nome AS nome_original,
+                nome_alternativo,
                 grupo,
                 temperamento,
                 expectativa_vida,
                 peso_metrico,
+                peso_imperial,
                 altura_metrica,
+                altura_imperial,
                 'TheDogAPI' AS origem
+                , origem_raca
+                , criado_para
+                , referencia_imagem_id
+                , 'Nao informado' AS imagem_url
+                , 'Nao informado' AS descricao
             FROM dogapi_cache
             ORDER BY nome ASC
             """
@@ -778,7 +901,7 @@ def buscar_raca_no_cache_por_nome(nome: str) -> Optional[sqlite3.Row]:
 
 
 def buscar_no_dogapi_por_nome(nome: str) -> Optional[dict]:
-    """Busca on-demand no TheDogAPI. Persiste no dogapi_cache e retorna None se não encontrado."""
+    """Busca on-demand no TheDogAPI. Persiste no cache local e retorna None se não encontrado."""
     logger.info("DOGAPI consulta iniciada nome_consulta='%s'", nome)
     try:
         resposta = requests.get(
@@ -818,15 +941,7 @@ def restaurar_racas_externas_a_partir_do_cache() -> int:
     with obter_conexao_banco() as conexao:
         linhas = conexao.execute(
             """
-            SELECT
-                id_dog_api,
-                nome,
-                grupo,
-                temperamento,
-                expectativa_vida,
-                peso_metrico,
-                altura_metrica,
-                atualizado_em
+            SELECT *
             FROM dogapi_cache
             ORDER BY nome ASC
             """
@@ -834,32 +949,9 @@ def restaurar_racas_externas_a_partir_do_cache() -> int:
 
         total = 0
         for linha in linhas:
-            conexao.execute(
-                """
-                INSERT INTO racas_externas (
-                    id_raca, nome, grupo, temperamento, expectativa_vida,
-                    peso_metrico, altura_metrica, origem, atualizado_em
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'TheDogAPI', ?)
-                ON CONFLICT(id_raca) DO UPDATE SET
-                    nome=excluded.nome,
-                    grupo=excluded.grupo,
-                    temperamento=excluded.temperamento,
-                    expectativa_vida=excluded.expectativa_vida,
-                    peso_metrico=excluded.peso_metrico,
-                    altura_metrica=excluded.altura_metrica,
-                    origem=excluded.origem,
-                    atualizado_em=excluded.atualizado_em
-                """,
-                (
-                    linha["id_dog_api"],
-                    linha["nome"],
-                    linha["grupo"],
-                    linha["temperamento"],
-                    linha["expectativa_vida"],
-                    linha["peso_metrico"],
-                    linha["altura_metrica"],
-                    linha["atualizado_em"] or agora_utc_iso(),
-                ),
+            salvar_raca_externa(
+                conexao,
+                montar_dados_raca_externa_da_linha(linha),
             )
             total += 1
 
@@ -1018,17 +1110,9 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
 
     linha_local = buscar_raca_local_por_nome(nome_limpo)
     if linha_local and linha_possui_dados_uteis(linha_local):
-        return {
-            "mensagem": "Raca ja presente na base local.",
-            "nome": linha_local["nome"],
-            "nomeExterno": nome_consulta_externa if nome_consulta_externa != linha_local["nome"] else linha_local["nome"],
-            "grupo": linha_local["grupo"],
-            "temperamento": linha_local["temperamento"],
-            "expectativaVida": linha_local["expectativa_vida"],
-            "peso": linha_local["peso"],
-            "altura": linha_local["altura"],
-            "fonte": linha_local["origem"],
-        }
+        resposta = montar_resposta_info_raca(nome_limpo, linha_local, linha_local["origem"])
+        resposta["mensagem"] = "Raca ja presente na base local."
+        return resposta
 
     grupo = dados.grupo
     temperamento = dados.temperamento
@@ -1049,7 +1133,7 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
         expectativa_vida = expectativa_vida or linha_externa["expectativa_vida"]
         peso = peso or linha_externa["peso_metrico"]
         altura = altura or linha_externa["altura_metrica"]
-        origem = "TheDogAPI"
+        origem = linha_externa["origem"]
     else:
         linha_cache = None
         for candidato in candidatos_consulta or [nome_limpo]:
@@ -1066,32 +1150,9 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
             origem = "TheDogAPI"
 
             with obter_conexao_banco() as conexao:
-                conexao.execute(
-                    """
-                    INSERT INTO racas_externas (
-                        id_raca, nome, grupo, temperamento, expectativa_vida,
-                        peso_metrico, altura_metrica, origem, atualizado_em
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'TheDogAPI', ?)
-                    ON CONFLICT(id_raca) DO UPDATE SET
-                        nome=excluded.nome,
-                        grupo=excluded.grupo,
-                        temperamento=excluded.temperamento,
-                        expectativa_vida=excluded.expectativa_vida,
-                        peso_metrico=excluded.peso_metrico,
-                        altura_metrica=excluded.altura_metrica,
-                        origem=excluded.origem,
-                        atualizado_em=excluded.atualizado_em
-                    """,
-                    (
-                        linha_cache["id_raca"],
-                        linha_cache["nome"],
-                        linha_cache["grupo"],
-                        linha_cache["temperamento"],
-                        linha_cache["expectativa_vida"],
-                        linha_cache["peso_metrico"],
-                        linha_cache["altura_metrica"],
-                        agora_utc_iso(),
-                    ),
+                salvar_raca_externa(
+                    conexao,
+                    montar_dados_raca_externa_da_linha(linha_cache),
                 )
         else:
             resultado_api = None
@@ -1116,7 +1177,7 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
     with obter_conexao_banco() as conexao:
         salvar_raca_local(conexao, nome_limpo, grupo_final, temperamento_final, expectativa_final, peso_final, altura_final, origem)
 
-    return {
+    resposta = {
         "mensagem": "Raca cadastrada na base local com sucesso.",
         "nome": nome_limpo,
         "nomeExterno": nome_consulta_externa if nome_consulta_externa != nome_limpo else nome_limpo,
@@ -1127,6 +1188,10 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
         "altura": altura_final,
         "fonte": origem,
     }
+    if linha_externa:
+        resposta.update(montar_resposta_info_raca(nome_limpo, linha_externa, origem))
+        resposta["mensagem"] = "Raca cadastrada na base local com sucesso."
+    return resposta
 
 
 def consultar_info_raca(nome: str) -> dict:
@@ -1160,16 +1225,7 @@ def consultar_info_raca(nome: str) -> dict:
             nome_limpo,
             linha_local["nome"],
         )
-        return {
-            "nome": nome_limpo,
-            "nomeExterno": linha_local["nome"],
-            "grupo": linha_local["grupo"],
-            "temperamento": linha_local["temperamento"],
-            "expectativaVida": linha_local["expectativa_vida"],
-            "peso": linha_local["peso"],
-            "altura": linha_local["altura"],
-            "fonte": linha_local["origem"],
-        }
+        return montar_resposta_info_raca(nome_limpo, linha_local, linha_local["origem"])
 
     linha = None
     for candidato in candidatos_consulta or [nome_limpo]:
@@ -1184,17 +1240,7 @@ def consultar_info_raca(nome: str) -> dict:
             linha["nome"],
             linha["id_raca"],
         )
-        return {
-            "nome": nome_limpo,
-            "nomeExterno": linha["nome"],
-            "grupo": linha["grupo"],
-            "temperamento": linha["temperamento"],
-            "expectativaVida": linha["expectativa_vida"],
-            "peso": linha["peso_metrico"],
-            "altura": linha["altura_metrica"],
-            "fonte": linha["origem"],
-            "raceId": linha["id_raca"],
-        }
+        return montar_resposta_info_raca(nome_limpo, linha, linha["origem"])
 
     linha_cache = None
     for candidato in candidatos_consulta or [nome_limpo]:
@@ -1203,32 +1249,9 @@ def consultar_info_raca(nome: str) -> dict:
             break
     if linha_cache:
         with obter_conexao_banco() as conexao:
-            conexao.execute(
-                """
-                INSERT INTO racas_externas (
-                    id_raca, nome, grupo, temperamento, expectativa_vida,
-                    peso_metrico, altura_metrica, origem, atualizado_em
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'TheDogAPI', ?)
-                ON CONFLICT(id_raca) DO UPDATE SET
-                    nome=excluded.nome,
-                    grupo=excluded.grupo,
-                    temperamento=excluded.temperamento,
-                    expectativa_vida=excluded.expectativa_vida,
-                    peso_metrico=excluded.peso_metrico,
-                    altura_metrica=excluded.altura_metrica,
-                    origem=excluded.origem,
-                    atualizado_em=excluded.atualizado_em
-                """,
-                (
-                    linha_cache["id_raca"],
-                    linha_cache["nome"],
-                    linha_cache["grupo"],
-                    linha_cache["temperamento"],
-                    linha_cache["expectativa_vida"],
-                    linha_cache["peso_metrico"],
-                    linha_cache["altura_metrica"],
-                    agora_utc_iso(),
-                ),
+            salvar_raca_externa(
+                conexao,
+                montar_dados_raca_externa_da_linha(linha_cache),
             )
 
         registrar_evento_consulta(nome_limpo, linha_cache["id_raca"])
@@ -1238,17 +1261,7 @@ def consultar_info_raca(nome: str) -> dict:
             linha_cache["nome"],
             linha_cache["id_raca"],
         )
-        return {
-            "nome": nome_limpo,
-            "nomeExterno": linha_cache["nome"],
-            "grupo": linha_cache["grupo"],
-            "temperamento": linha_cache["temperamento"],
-            "expectativaVida": linha_cache["expectativa_vida"],
-            "peso": linha_cache["peso_metrico"],
-            "altura": linha_cache["altura_metrica"],
-            "fonte": linha_cache["origem"],
-            "raceId": linha_cache["id_raca"],
-        }
+        return montar_resposta_info_raca(nome_limpo, linha_cache, linha_cache["origem"])
 
     resultado_api = None
     for candidato in candidatos_consulta or [nome_consulta_externa]:
@@ -1273,17 +1286,11 @@ def consultar_info_raca(nome: str) -> dict:
             nome_api,
             resultado_api.get("id"),
         )
-        return {
-            "nome": nome_limpo,
-            "nomeExterno": nome_api,
-            "grupo": grupo,
-            "temperamento": temperamento,
-            "expectativaVida": expectativa,
-            "peso": peso,
-            "altura": altura,
-            "fonte": "TheDogAPI",
-            "raceId": resultado_api.get("id"),
-        }
+        return montar_resposta_info_raca(
+            nome_limpo,
+            montar_dados_raca_externa_do_item(resultado_api),
+            "TheDogAPI",
+        )
 
     if linha_local:
         registrar_evento_consulta(nome_limpo, None)
@@ -1292,16 +1299,7 @@ def consultar_info_raca(nome: str) -> dict:
             nome_limpo,
             linha_local["nome"],
         )
-        return {
-            "nome": nome_limpo,
-            "nomeExterno": linha_local["nome"],
-            "grupo": linha_local["grupo"],
-            "temperamento": linha_local["temperamento"],
-            "expectativaVida": linha_local["expectativa_vida"],
-            "peso": linha_local["peso"],
-            "altura": linha_local["altura"],
-            "fonte": linha_local["origem"],
-        }
+        return montar_resposta_info_raca(nome_limpo, linha_local, linha_local["origem"])
 
     registrar_evento_consulta(nome_limpo, None)
     logger.warning(
@@ -1330,16 +1328,16 @@ def obter_info_raca_por_path(nome: str) -> dict:
 def listar_cache_dogapi(limit: int = 50, offset: int = 0) -> dict:
     with obter_conexao_banco() as conexao:
         total = conexao.execute(
-            "SELECT COUNT(*) AS total FROM dogapi_cache"
+            "SELECT COUNT(*) AS total FROM racas_externas"
         ).fetchone()["total"]
 
         linhas = conexao.execute(
             """
-            SELECT id_dog_api, nome, nome_alternativo, grupo, temperamento,
+            SELECT id_raca AS id_dog_api, nome, nome_original, nome_alternativo, grupo, temperamento,
                    expectativa_vida, peso_metrico, peso_imperial,
                    altura_metrica, altura_imperial,
-                   origem_raca, criado_para, referencia_imagem_id, atualizado_em
-            FROM dogapi_cache
+                   origem, origem_raca, criado_para, referencia_imagem_id, imagem_url, descricao, atualizado_em
+            FROM racas_externas
             ORDER BY nome ASC
             LIMIT ? OFFSET ?
             """,
@@ -1358,7 +1356,7 @@ def listar_cache_dogapi(limit: int = 50, offset: int = 0) -> dict:
 def buscar_cache_dogapi_por_id(id_dog_api: int) -> dict:
     with obter_conexao_banco() as conexao:
         linha = conexao.execute(
-            "SELECT * FROM dogapi_cache WHERE id_dog_api = ?",
+            "SELECT * FROM racas_externas WHERE id_raca = ?",
             (id_dog_api,),
         ).fetchone()
 
@@ -1374,9 +1372,7 @@ def resumo_analytics() -> dict:
             "SELECT COUNT(*) AS total FROM racas_externas"
         ).fetchone()["total"]
 
-        total_cache_dogapi = conexao.execute(
-            "SELECT COUNT(*) AS total FROM dogapi_cache"
-        ).fetchone()["total"]
+        total_cache_dogapi = total_racas_externas
 
         total_racas_locais = conexao.execute(
             "SELECT COUNT(*) AS total FROM racas_locais"
