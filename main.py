@@ -5,6 +5,7 @@ import logging
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -16,19 +17,35 @@ from pydantic import BaseModel
 
 load_dotenv()
 
+BASE_DIR = Path(__file__).resolve().parent
+LOG_LEVEL = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+
+logger = logging.getLogger("eleve.data_service")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    logger.addHandler(handler)
+logger.setLevel(LOG_LEVEL)
+logger.propagate = False
+
 CHAVE_API_DOG = os.getenv(
     "CHAVE_API_DOG",
     os.getenv("DOG_API_KEY", ""),
 ).strip()
-CAMINHO_BANCO_DADOS = os.getenv(
-    "CAMINHO_BANCO_DADOS_PY",
-    os.getenv("DADOS_PY_DB_PATH", "./dados_py.db"),
+CAMINHO_BANCO_DADOS = str(
+    Path(
+        os.getenv(
+            "CAMINHO_BANCO_DADOS_PY",
+            os.getenv("DADOS_PY_DB_PATH", str(BASE_DIR / "dados_py.db")),
+        )
+    )
+    .expanduser()
+    .resolve()
 )
 URL_BASE_API_DOG = "https://api.thedogapi.com/v1"
 HORA_SINCRONIZACAO_UTC = int(os.getenv("HORA_SINCRONIZACAO_UTC", "3"))
-
-logger = logging.getLogger("eleve.data_service")
-logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
 
 RACA_DE_PARA = {
     "foxhound americano": "American Foxhound",
@@ -43,6 +60,7 @@ RACA_DE_PARA = {
     "pastor australiano": "Australian Shepherd",
     "cocker spaniel ingles": "English Cocker Spaniel",
     "cavalier king charles spaniel": "Cavalier King Charles Spaniel",
+    "havanes": "Havanese",
     "maltes": "Maltese",
     "shih tzu": "Shih Tzu",
     "shihtzu": "Shih Tzu",
@@ -295,6 +313,138 @@ def inicializar_banco() -> None:
             )
             """
         )
+
+
+def mesclar_banco_legado_se_necessario() -> None:
+    caminho_canonico = Path(CAMINHO_BANCO_DADOS).resolve()
+    caminho_legado = (Path.cwd() / "dados_py.db").resolve()
+
+    if caminho_legado == caminho_canonico or not caminho_legado.exists():
+        return
+
+    logger.warning(
+        "STARTUP banco legado detectado. origem='%s' destino='%s'",
+        caminho_legado,
+        caminho_canonico,
+    )
+
+    total_racas_locais = 0
+    total_racas_externas = 0
+    total_cache = 0
+
+    try:
+        with sqlite3.connect(caminho_legado) as origem:
+            origem.row_factory = sqlite3.Row
+            with obter_conexao_banco() as destino:
+                try:
+                    for linha in origem.execute("SELECT * FROM racas_locais"):
+                        salvar_raca_local(
+                            destino,
+                            linha["nome"],
+                            linha["grupo"],
+                            linha["temperamento"],
+                            linha["expectativa_vida"],
+                            linha["peso"],
+                            linha["altura"],
+                            linha["origem"],
+                        )
+                        total_racas_locais += 1
+                except sqlite3.OperationalError:
+                    pass
+
+                try:
+                    for linha in origem.execute("SELECT * FROM racas_externas"):
+                        destino.execute(
+                            """
+                            INSERT INTO racas_externas (
+                                id_raca, nome, grupo, temperamento, expectativa_vida,
+                                peso_metrico, altura_metrica, origem, atualizado_em
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(id_raca) DO UPDATE SET
+                                nome=excluded.nome,
+                                grupo=excluded.grupo,
+                                temperamento=excluded.temperamento,
+                                expectativa_vida=excluded.expectativa_vida,
+                                peso_metrico=excluded.peso_metrico,
+                                altura_metrica=excluded.altura_metrica,
+                                origem=excluded.origem,
+                                atualizado_em=excluded.atualizado_em
+                            """,
+                            (
+                                linha["id_raca"],
+                                linha["nome"],
+                                linha["grupo"],
+                                linha["temperamento"],
+                                linha["expectativa_vida"],
+                                linha["peso_metrico"],
+                                linha["altura_metrica"],
+                                linha["origem"],
+                                linha["atualizado_em"],
+                            ),
+                        )
+                        total_racas_externas += 1
+                except sqlite3.OperationalError:
+                    pass
+
+                try:
+                    for linha in origem.execute("SELECT * FROM dogapi_cache"):
+                        destino.execute(
+                            """
+                            INSERT INTO dogapi_cache (
+                                id_dog_api, nome, nome_alternativo, grupo, temperamento,
+                                expectativa_vida, peso_metrico, peso_imperial,
+                                altura_metrica, altura_imperial,
+                                origem_raca, criado_para, referencia_imagem_id, atualizado_em
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(id_dog_api) DO UPDATE SET
+                                nome=excluded.nome,
+                                nome_alternativo=excluded.nome_alternativo,
+                                grupo=excluded.grupo,
+                                temperamento=excluded.temperamento,
+                                expectativa_vida=excluded.expectativa_vida,
+                                peso_metrico=excluded.peso_metrico,
+                                peso_imperial=excluded.peso_imperial,
+                                altura_metrica=excluded.altura_metrica,
+                                altura_imperial=excluded.altura_imperial,
+                                origem_raca=excluded.origem_raca,
+                                criado_para=excluded.criado_para,
+                                referencia_imagem_id=excluded.referencia_imagem_id,
+                                atualizado_em=excluded.atualizado_em
+                            """,
+                            (
+                                linha["id_dog_api"],
+                                linha["nome"],
+                                linha["nome_alternativo"],
+                                linha["grupo"],
+                                linha["temperamento"],
+                                linha["expectativa_vida"],
+                                linha["peso_metrico"],
+                                linha["peso_imperial"],
+                                linha["altura_metrica"],
+                                linha["altura_imperial"],
+                                linha["origem_raca"],
+                                linha["criado_para"],
+                                linha["referencia_imagem_id"],
+                                linha["atualizado_em"],
+                            ),
+                        )
+                        total_cache += 1
+                except sqlite3.OperationalError:
+                    pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "STARTUP falha ao mesclar banco legado. origem='%s' detalhe='%s'",
+            caminho_legado,
+            exc,
+        )
+        return
+
+    logger.info(
+        "STARTUP banco legado mesclado. racas_locais=%s racas_externas=%s dogapi_cache=%s",
+        total_racas_locais,
+        total_racas_externas,
+        total_cache,
+    )
 
 
 def montar_cabecalhos_api_dog() -> dict:
@@ -566,6 +716,26 @@ def buscar_raca_por_nome(nome: str) -> Optional[sqlite3.Row]:
     return buscar_melhor_correspondencia(nome, linhas)
 
 
+def buscar_raca_no_cache_por_nome(nome: str) -> Optional[sqlite3.Row]:
+    with obter_conexao_banco() as conexao:
+        linhas = conexao.execute(
+            """
+            SELECT
+                id_dog_api AS id_raca,
+                nome,
+                grupo,
+                temperamento,
+                expectativa_vida,
+                peso_metrico,
+                altura_metrica,
+                'TheDogAPI' AS origem
+            FROM dogapi_cache
+            ORDER BY nome ASC
+            """
+        ).fetchall()
+    return buscar_melhor_correspondencia(nome, linhas)
+
+
 def buscar_no_dogapi_por_nome(nome: str) -> Optional[dict]:
     """Busca on-demand no TheDogAPI. Persiste no dogapi_cache e retorna None se não encontrado."""
     logger.info("DOGAPI consulta iniciada nome_consulta='%s'", nome)
@@ -583,7 +753,7 @@ def buscar_no_dogapi_por_nome(nome: str) -> Optional[dict]:
             return None
         item = resultados[0]
         with obter_conexao_banco() as conexao:
-            salvar_no_cache_dogapi(conexao, item)
+            inserir_ou_atualizar_raca(conexao, item)
         logger.info(
             "DOGAPI consulta concluida nome_consulta='%s' nome_encontrado='%s' id='%s'",
             nome,
@@ -603,10 +773,70 @@ def contar_racas_externas() -> int:
         ).fetchone()["total"]
 
 
+def restaurar_racas_externas_a_partir_do_cache() -> int:
+    with obter_conexao_banco() as conexao:
+        linhas = conexao.execute(
+            """
+            SELECT
+                id_dog_api,
+                nome,
+                grupo,
+                temperamento,
+                expectativa_vida,
+                peso_metrico,
+                altura_metrica,
+                atualizado_em
+            FROM dogapi_cache
+            ORDER BY nome ASC
+            """
+        ).fetchall()
+
+        total = 0
+        for linha in linhas:
+            conexao.execute(
+                """
+                INSERT INTO racas_externas (
+                    id_raca, nome, grupo, temperamento, expectativa_vida,
+                    peso_metrico, altura_metrica, origem, atualizado_em
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'TheDogAPI', ?)
+                ON CONFLICT(id_raca) DO UPDATE SET
+                    nome=excluded.nome,
+                    grupo=excluded.grupo,
+                    temperamento=excluded.temperamento,
+                    expectativa_vida=excluded.expectativa_vida,
+                    peso_metrico=excluded.peso_metrico,
+                    altura_metrica=excluded.altura_metrica,
+                    origem=excluded.origem,
+                    atualizado_em=excluded.atualizado_em
+                """,
+                (
+                    linha["id_dog_api"],
+                    linha["nome"],
+                    linha["grupo"],
+                    linha["temperamento"],
+                    linha["expectativa_vida"],
+                    linha["peso_metrico"],
+                    linha["altura_metrica"],
+                    linha["atualizado_em"] or agora_utc_iso(),
+                ),
+            )
+            total += 1
+
+    return total
+
+
 def sincronizar_racas_iniciais_se_necessario() -> None:
     total_racas = contar_racas_externas()
     if total_racas > 0:
         logger.info("STARTUP base externa ja populada total_racas=%s", total_racas)
+        return
+
+    total_restaurado = restaurar_racas_externas_a_partir_do_cache()
+    if total_restaurado > 0:
+        logger.info(
+            "STARTUP base externa restaurada a partir do cache local total_racas=%s",
+            total_restaurado,
+        )
         return
 
     logger.info("STARTUP base externa vazia. iniciando sincronizacao completa de racas")
@@ -692,6 +922,8 @@ def executar_sincronizacao_etl() -> dict:
 @app.on_event("startup")
 def iniciar_aplicacao() -> None:
     inicializar_banco()
+    mesclar_banco_legado_se_necessario()
+    logger.info("STARTUP servico inicializado banco='%s'", CAMINHO_BANCO_DADOS)
     sincronizar_racas_iniciais_se_necessario()
 
     scheduler.add_job(
@@ -772,18 +1004,61 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
         altura = altura or linha_externa["altura_metrica"]
         origem = "TheDogAPI"
     else:
-        resultado_api = None
-        for candidato in candidatos_consulta or [nome_consulta_externa]:
-            resultado_api = buscar_no_dogapi_por_nome(candidato)
-            if resultado_api:
+        linha_cache = None
+        for candidato in candidatos_consulta or [nome_limpo]:
+            linha_cache = buscar_raca_no_cache_por_nome(candidato)
+            if linha_cache is not None:
                 break
-        if resultado_api:
-            grupo = grupo or normalizar_texto(resultado_api.get("breed_group"))
-            temperamento = temperamento or normalizar_texto(resultado_api.get("temperament"))
-            expectativa_vida = expectativa_vida or normalizar_texto(resultado_api.get("life_span"))
-            peso = peso or normalizar_texto((resultado_api.get("weight") or {}).get("metric"))
-            altura = altura or normalizar_texto((resultado_api.get("height") or {}).get("metric"))
+
+        if linha_cache:
+            grupo = grupo or linha_cache["grupo"]
+            temperamento = temperamento or linha_cache["temperamento"]
+            expectativa_vida = expectativa_vida or linha_cache["expectativa_vida"]
+            peso = peso or linha_cache["peso_metrico"]
+            altura = altura or linha_cache["altura_metrica"]
             origem = "TheDogAPI"
+
+            with obter_conexao_banco() as conexao:
+                conexao.execute(
+                    """
+                    INSERT INTO racas_externas (
+                        id_raca, nome, grupo, temperamento, expectativa_vida,
+                        peso_metrico, altura_metrica, origem, atualizado_em
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'TheDogAPI', ?)
+                    ON CONFLICT(id_raca) DO UPDATE SET
+                        nome=excluded.nome,
+                        grupo=excluded.grupo,
+                        temperamento=excluded.temperamento,
+                        expectativa_vida=excluded.expectativa_vida,
+                        peso_metrico=excluded.peso_metrico,
+                        altura_metrica=excluded.altura_metrica,
+                        origem=excluded.origem,
+                        atualizado_em=excluded.atualizado_em
+                    """,
+                    (
+                        linha_cache["id_raca"],
+                        linha_cache["nome"],
+                        linha_cache["grupo"],
+                        linha_cache["temperamento"],
+                        linha_cache["expectativa_vida"],
+                        linha_cache["peso_metrico"],
+                        linha_cache["altura_metrica"],
+                        agora_utc_iso(),
+                    ),
+                )
+        else:
+            resultado_api = None
+            for candidato in candidatos_consulta or [nome_consulta_externa]:
+                resultado_api = buscar_no_dogapi_por_nome(candidato)
+                if resultado_api:
+                    break
+            if resultado_api:
+                grupo = grupo or normalizar_texto(resultado_api.get("breed_group"))
+                temperamento = temperamento or normalizar_texto(resultado_api.get("temperament"))
+                expectativa_vida = expectativa_vida or normalizar_texto(resultado_api.get("life_span"))
+                peso = peso or normalizar_texto((resultado_api.get("weight") or {}).get("metric"))
+                altura = altura or normalizar_texto((resultado_api.get("height") or {}).get("metric"))
+                origem = "TheDogAPI"
 
     grupo_final = grupo or "Nao informado"
     temperamento_final = temperamento or "Nao informado"
@@ -872,6 +1147,60 @@ def consultar_info_raca(nome: str) -> dict:
             "altura": linha["altura_metrica"],
             "fonte": linha["origem"],
             "raceId": linha["id_raca"],
+        }
+
+    linha_cache = None
+    for candidato in candidatos_consulta or [nome_limpo]:
+        linha_cache = buscar_raca_no_cache_por_nome(candidato)
+        if linha_cache is not None:
+            break
+    if linha_cache:
+        with obter_conexao_banco() as conexao:
+            conexao.execute(
+                """
+                INSERT INTO racas_externas (
+                    id_raca, nome, grupo, temperamento, expectativa_vida,
+                    peso_metrico, altura_metrica, origem, atualizado_em
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'TheDogAPI', ?)
+                ON CONFLICT(id_raca) DO UPDATE SET
+                    nome=excluded.nome,
+                    grupo=excluded.grupo,
+                    temperamento=excluded.temperamento,
+                    expectativa_vida=excluded.expectativa_vida,
+                    peso_metrico=excluded.peso_metrico,
+                    altura_metrica=excluded.altura_metrica,
+                    origem=excluded.origem,
+                    atualizado_em=excluded.atualizado_em
+                """,
+                (
+                    linha_cache["id_raca"],
+                    linha_cache["nome"],
+                    linha_cache["grupo"],
+                    linha_cache["temperamento"],
+                    linha_cache["expectativa_vida"],
+                    linha_cache["peso_metrico"],
+                    linha_cache["altura_metrica"],
+                    agora_utc_iso(),
+                ),
+            )
+
+        registrar_evento_consulta(nome_limpo, linha_cache["id_raca"])
+        logger.info(
+            "RACA consulta concluida fonte='dogapi_cache' nome='%s' nome_externo='%s' race_id='%s'",
+            nome_limpo,
+            linha_cache["nome"],
+            linha_cache["id_raca"],
+        )
+        return {
+            "nome": nome_limpo,
+            "nomeExterno": linha_cache["nome"],
+            "grupo": linha_cache["grupo"],
+            "temperamento": linha_cache["temperamento"],
+            "expectativaVida": linha_cache["expectativa_vida"],
+            "peso": linha_cache["peso_metrico"],
+            "altura": linha_cache["altura_metrica"],
+            "fonte": linha_cache["origem"],
+            "raceId": linha_cache["id_raca"],
         }
 
     resultado_api = None
