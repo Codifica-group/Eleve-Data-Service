@@ -24,7 +24,10 @@ logger = logging.getLogger("eleve.data_service")
 if not logger.handlers:
     handler = logging.StreamHandler()
     handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        logging.Formatter(
+            "%(asctime)s | %(levelname)-7s | %(message)s",
+            datefmt="%H:%M:%S",
+        )
     )
     logger.addHandler(handler)
 logger.setLevel(LOG_LEVEL)
@@ -73,6 +76,7 @@ RACA_DE_PARA = {
     "golden": "Golden Retriever",
     "beagle": "Beagle",
     "border collie": "Border Collie",
+    "galgo afegao": "Afghan Hound",
     "pug": "Pug",
     "rottweiler": "Rottweiler",
     "husky siberiano": "Siberian Husky",
@@ -192,13 +196,20 @@ async def registrar_requisicoes(request: Request, call_next):
     inicio = time.perf_counter()
     cliente = request.client.host if request.client else "desconhecido"
     query = str(request.url.query or "")
+    logger.debug(
+        "HTTP -> %s %s | q=%s | ip=%s",
+        request.method,
+        request.url.path,
+        query or "-",
+        cliente,
+    )
 
     try:
         response = await call_next(request)
     except Exception as exc:  # noqa: BLE001
         duracao_ms = round((time.perf_counter() - inicio) * 1000)
         logger.exception(
-            "REQ falhou metodo=%s path=%s query=%s cliente=%s duracao_ms=%s detalhe=%s",
+            "HTTP !! %s %s | q=%s | ip=%s | %sms | erro=%s",
             request.method,
             request.url.path,
             query or "-",
@@ -210,11 +221,9 @@ async def registrar_requisicoes(request: Request, call_next):
 
     duracao_ms = round((time.perf_counter() - inicio) * 1000)
     logger.info(
-        "REQ metodo=%s path=%s query=%s cliente=%s status=%s duracao_ms=%s",
+        "HTTP %s %s | %s | %sms",
         request.method,
         request.url.path,
-        query or "-",
-        cliente,
         response.status_code,
         duracao_ms,
     )
@@ -227,7 +236,11 @@ def agora_utc_iso() -> str:
 
 @contextmanager
 def obter_conexao_banco():
-    conexao = sqlite3.connect(CAMINHO_BANCO_DADOS)
+    try:
+        conexao = sqlite3.connect(CAMINHO_BANCO_DADOS)
+    except sqlite3.Error:
+        logger.exception("DB falha | path=%s", CAMINHO_BANCO_DADOS)
+        raise
     conexao.row_factory = sqlite3.Row
     try:
         yield conexao
@@ -241,6 +254,105 @@ def obter_colunas_tabela(conexao: sqlite3.Connection, tabela: str) -> set[str]:
         linha["name"]
         for linha in conexao.execute(f"PRAGMA table_info({tabela})").fetchall()
     }
+
+
+def tabela_existe(conexao: sqlite3.Connection, tabela: str) -> bool:
+    linha = conexao.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name = ?
+        """,
+        (tabela,),
+    ).fetchone()
+    return linha is not None
+
+
+def contar_registros_tabela(conexao: sqlite3.Connection, tabela: str) -> int:
+    if not tabela_existe(conexao, tabela):
+        return 0
+    return conexao.execute(f"SELECT COUNT(*) AS total FROM {tabela}").fetchone()["total"]
+
+
+def logar_configuracao_servico() -> None:
+    caminho_banco = Path(CAMINHO_BANCO_DADOS)
+    banco_existe = caminho_banco.exists()
+    tamanho_bytes = caminho_banco.stat().st_size if banco_existe else 0
+    logger.info(
+        "Startup | db=%s | key=%s | sync=%02d:00Z | min=%s | levels=DEBUG:diag INFO:fluxo WARN:alerta ERROR:fatal",
+        caminho_banco.name,
+        "on" if CHAVE_API_DOG else "off",
+        HORA_SINCRONIZACAO_UTC,
+        TOTAL_RACAS_MINIMO_SINCRONIZADAS,
+    )
+    logger.debug(
+        "Startup detalhe | path=%s | exists=%s | size=%s | cwd=%s",
+        caminho_banco,
+        banco_existe,
+        tamanho_bytes,
+        Path.cwd(),
+    )
+    logger.debug(
+        "Startup detalhe | log_level=%s",
+        logging.getLevelName(LOG_LEVEL),
+    )
+
+
+def logar_diagnostico_banco(contexto: str) -> None:
+    tabelas_esperadas = {
+        "dogapi_cache",
+        "eventos_consulta_raca",
+        "execucoes_sincronizacao",
+        "racas_externas",
+        "racas_locais",
+    }
+    with obter_conexao_banco() as conexao:
+        versao_sqlite = conexao.execute(
+            "SELECT sqlite_version() AS versao"
+        ).fetchone()["versao"]
+        tabelas = [
+            linha["name"]
+            for linha in conexao.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                ORDER BY name ASC
+                """
+            ).fetchall()
+        ]
+        tabelas_ausentes = sorted(tabelas_esperadas - set(tabelas))
+        total_racas_locais = contar_registros_tabela(conexao, "racas_locais")
+        total_racas_externas = contar_registros_tabela(conexao, "racas_externas")
+        total_cache_dogapi = contar_registros_tabela(conexao, "dogapi_cache")
+        total_eventos_consulta = contar_registros_tabela(conexao, "eventos_consulta_raca")
+        total_execucoes_sync = contar_registros_tabela(conexao, "execucoes_sincronizacao")
+
+    caminho_banco = Path(CAMINHO_BANCO_DADOS)
+    banco_existe = caminho_banco.exists()
+    tamanho_bytes = caminho_banco.stat().st_size if banco_existe else 0
+    nivel_resumo = logging.INFO if contexto == "apos_sincronizacao_inicial" else logging.DEBUG
+    logger.log(
+        nivel_resumo,
+        "DB ok | ctx=%s | db=%s | local=%s | externa=%s | cache=%s | consultas=%s | sync=%s",
+        contexto,
+        caminho_banco.name,
+        total_racas_locais,
+        total_racas_externas,
+        total_cache_dogapi,
+        total_eventos_consulta,
+        total_execucoes_sync,
+    )
+    logger.debug(
+        "DB detalhe | ctx=%s | path=%s | exists=%s | size=%s | sqlite=%s | tables=%s | missing=%s",
+        contexto,
+        caminho_banco,
+        banco_existe,
+        tamanho_bytes,
+        versao_sqlite,
+        ", ".join(tabelas) or "-",
+        ", ".join(tabelas_ausentes) or "-",
+    )
 
 
 def garantir_colunas_racas_externas(conexao: sqlite3.Connection) -> None:
@@ -364,9 +476,9 @@ def mesclar_banco_legado_se_necessario() -> None:
         return
 
     logger.warning(
-        "STARTUP banco legado detectado. origem='%s' destino='%s'",
-        caminho_legado,
-        caminho_canonico,
+        "Legado detectado | src=%s | dst=%s",
+        caminho_legado.name,
+        caminho_canonico.name,
     )
 
     total_racas_locais = 0
@@ -454,14 +566,14 @@ def mesclar_banco_legado_se_necessario() -> None:
                     pass
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "STARTUP falha ao mesclar banco legado. origem='%s' detalhe='%s'",
-            caminho_legado,
+            "Legado falhou | src=%s | erro=%s",
+            caminho_legado.name,
             exc,
         )
         return
 
     logger.info(
-        "STARTUP banco legado mesclado. racas_locais=%s racas_externas=%s dogapi_cache=%s",
+        "Legado mesclado | local=%s | externa=%s | cache=%s",
         total_racas_locais,
         total_racas_externas,
         total_cache,
@@ -856,7 +968,14 @@ def buscar_raca_local_por_nome(nome: str) -> Optional[sqlite3.Row]:
             ORDER BY nome ASC
             """
         ).fetchall()
-    return buscar_melhor_correspondencia(nome, linhas)
+    resultado = buscar_melhor_correspondencia(nome, linhas)
+    logger.debug(
+        "DB local | q=%s | n=%s | hit=%s",
+        nome,
+        len(linhas),
+        obter_valor_coluna(resultado, "nome", "-"),
+    )
+    return resultado
 
 
 def buscar_raca_por_nome(nome: str) -> Optional[sqlite3.Row]:
@@ -868,7 +987,14 @@ def buscar_raca_por_nome(nome: str) -> Optional[sqlite3.Row]:
             ORDER BY nome ASC
             """
         ).fetchall()
-    return buscar_melhor_correspondencia(nome, linhas)
+    resultado = buscar_melhor_correspondencia(nome, linhas)
+    logger.debug(
+        "DB externa | q=%s | n=%s | hit=%s",
+        nome,
+        len(linhas),
+        obter_valor_coluna(resultado, "nome", "-"),
+    )
+    return resultado
 
 
 def buscar_raca_no_cache_por_nome(nome: str) -> Optional[sqlite3.Row]:
@@ -897,12 +1023,22 @@ def buscar_raca_no_cache_por_nome(nome: str) -> Optional[sqlite3.Row]:
             ORDER BY nome ASC
             """
         ).fetchall()
-    return buscar_melhor_correspondencia(nome, linhas)
+    resultado = buscar_melhor_correspondencia(nome, linhas)
+    logger.debug(
+        "DB cache | q=%s | n=%s | hit=%s",
+        nome,
+        len(linhas),
+        obter_valor_coluna(resultado, "nome", "-"),
+    )
+    return resultado
 
 
 def buscar_no_dogapi_por_nome(nome: str) -> Optional[dict]:
     """Busca on-demand no TheDogAPI. Persiste no cache local e retorna None se não encontrado."""
-    logger.info("DOGAPI consulta iniciada nome_consulta='%s'", nome)
+    logger.info(
+        "DogAPI GET /breeds/search | q=%s",
+        nome,
+    )
     try:
         resposta = requests.get(
             f"{URL_BASE_API_DOG}/breeds/search",
@@ -912,21 +1048,27 @@ def buscar_no_dogapi_por_nome(nome: str) -> Optional[dict]:
         )
         resposta.raise_for_status()
         resultados = resposta.json()
+        logger.info(
+            "DogAPI %s /breeds/search | q=%s | hits=%s",
+            resposta.status_code,
+            nome,
+            len(resultados),
+        )
         if not resultados:
-            logger.info("DOGAPI consulta sem resultado nome_consulta='%s'", nome)
+            logger.info("DogAPI miss | q=%s", nome)
             return None
         item = resultados[0]
         with obter_conexao_banco() as conexao:
             inserir_ou_atualizar_raca(conexao, item)
         logger.info(
-            "DOGAPI consulta concluida nome_consulta='%s' nome_encontrado='%s' id='%s'",
+            "DogAPI hit | q=%s | nome=%s | id=%s | save=cache,externa",
             nome,
             item.get("name"),
             item.get("id"),
         )
         return item
     except Exception as exc:  # noqa: BLE001
-        logger.warning("DOGAPI consulta falhou nome_consulta='%s' detalhe='%s'", nome, exc)
+        logger.warning("DogAPI falhou | q=%s | erro=%s", nome, exc)
         return None
 
 
@@ -961,12 +1103,12 @@ def restaurar_racas_externas_a_partir_do_cache() -> int:
 def sincronizar_racas_iniciais_se_necessario() -> None:
     total_racas = contar_racas_externas()
     if total_racas >= TOTAL_RACAS_MINIMO_SINCRONIZADAS:
-        logger.info("STARTUP base externa ja populada total_racas=%s", total_racas)
+        logger.info("Startup | base_externa=ok | total=%s", total_racas)
         return
 
     if total_racas > 0:
         logger.info(
-            "STARTUP base externa incompleta total_racas=%s minimo_esperado=%s",
+            "Startup | base_externa=incompleta | total=%s | min=%s",
             total_racas,
             TOTAL_RACAS_MINIMO_SINCRONIZADAS,
         )
@@ -974,31 +1116,31 @@ def sincronizar_racas_iniciais_se_necessario() -> None:
     total_restaurado = restaurar_racas_externas_a_partir_do_cache()
     if total_restaurado > 0:
         logger.info(
-            "STARTUP base externa restaurada a partir do cache local total_racas=%s",
+            "Startup | base_externa=restaurada_cache | total=%s",
             total_restaurado,
         )
 
-    logger.info("STARTUP base externa vazia ou incompleta. iniciando sincronizacao completa de racas")
+    logger.info("Startup | base_externa=sync_full")
     try:
         resultado = executar_sincronizacao_etl()
         logger.info(
-            "STARTUP sincronizacao concluida status=%s total_registros=%s",
+            "Startup | sync=%s | total=%s",
             resultado.get("status"),
             resultado.get("totalRegistros"),
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("STARTUP sincronizacao inicial falhou detalhe='%s'", exc)
+        logger.warning("Startup | sync=falhou | erro=%s", exc)
 
 
-def registrar_evento_consulta(nome: str, id_raca: Optional[int]) -> None:
+def registrar_evento_consulta(nome: str, id_raca: Optional[int], origem: str) -> None:
     with obter_conexao_banco() as conexao:
         conexao.execute(
             """
             INSERT INTO eventos_consulta_raca
             (nome_consultado, id_raca, encontrado, origem, consultado_em)
-            VALUES (?, ?, ?, 'TheDogAPI', ?)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (nome, id_raca, 1 if id_raca else 0, agora_utc_iso()),
+            (nome, id_raca, 1 if id_raca else 0, origem, agora_utc_iso()),
         )
 
 
@@ -1015,6 +1157,8 @@ def executar_sincronizacao_etl() -> dict:
         )
         id_execucao = cursor.lastrowid
 
+    logger.info("ETL start | id=%s | endpoint=/breeds", id_execucao)
+
     try:
         resposta = requests.get(
             f"{URL_BASE_API_DOG}/breeds",
@@ -1023,6 +1167,7 @@ def executar_sincronizacao_etl() -> dict:
         )
         resposta.raise_for_status()
         racas = resposta.json()
+        logger.info("ETL http | id=%s | status=%s | total=%s", id_execucao, resposta.status_code, len(racas))
 
         total = 0
         with obter_conexao_banco() as conexao:
@@ -1040,6 +1185,7 @@ def executar_sincronizacao_etl() -> dict:
                 (agora_utc_iso(), total, id_execucao),
             )
 
+        logger.info("ETL ok | id=%s | total=%s", id_execucao, total)
         return {
             "status": "succeeded",
             "totalRegistros": total,
@@ -1055,15 +1201,19 @@ def executar_sincronizacao_etl() -> dict:
                 """,
                 (agora_utc_iso(), str(exc), id_execucao),
             )
+        logger.warning("ETL falhou | id=%s | erro=%s", id_execucao, exc)
         raise
 
 
 @app.on_event("startup")
 def iniciar_aplicacao() -> None:
+    logar_configuracao_servico()
     inicializar_banco()
+    logar_diagnostico_banco("apos_inicializar_banco")
     mesclar_banco_legado_se_necessario()
-    logger.info("STARTUP servico inicializado banco='%s'", CAMINHO_BANCO_DADOS)
+    logar_diagnostico_banco("apos_mesclar_banco_legado")
     sincronizar_racas_iniciais_se_necessario()
+    logar_diagnostico_banco("apos_sincronizacao_inicial")
 
     scheduler.add_job(
         executar_sincronizacao_etl,
@@ -1072,12 +1222,15 @@ def iniciar_aplicacao() -> None:
         minute=0,
     )
     scheduler.start()
+    logger.info("Startup | scheduler=on | %02d:00Z", HORA_SINCRONIZACAO_UTC)
 
 
 @app.on_event("shutdown")
 def encerrar_aplicacao() -> None:
+    logger.info("Shutdown | app=off")
     if scheduler.running:
         scheduler.shutdown(wait=False)
+        logger.info("Shutdown | scheduler=off")
 
 
 @app.get("/health")
@@ -1102,6 +1255,12 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
     nome_limpo = dados.nome.strip()
     candidatos_consulta = gerar_candidatos_consulta_externa(nome_limpo)
     nome_consulta_externa = candidatos_consulta[0] if candidatos_consulta else nome_limpo
+    logger.debug(
+        "Raca cadastro -> nome=%s | ext=%s | candidatos=%s",
+        nome_limpo,
+        nome_consulta_externa,
+        candidatos_consulta,
+    )
     if len(nome_limpo) < 2:
         raise HTTPException(
             status_code=400,
@@ -1112,6 +1271,11 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
     if linha_local and linha_possui_dados_uteis(linha_local):
         resposta = montar_resposta_info_raca(nome_limpo, linha_local, linha_local["origem"])
         resposta["mensagem"] = "Raca ja presente na base local."
+        logger.info(
+            "Raca cadastro | src=local | nome=%s | ext=%s",
+            nome_limpo,
+            linha_local["nome"],
+        )
         return resposta
 
     grupo = dados.grupo
@@ -1120,6 +1284,7 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
     peso = dados.peso
     altura = dados.altura
     origem = "usuario"
+    fonte_cadastro = "usuario"
 
     linha_externa = None
     for candidato in candidatos_consulta or [nome_limpo]:
@@ -1134,6 +1299,7 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
         peso = peso or linha_externa["peso_metrico"]
         altura = altura or linha_externa["altura_metrica"]
         origem = linha_externa["origem"]
+        fonte_cadastro = "raca_externa"
     else:
         linha_cache = None
         for candidato in candidatos_consulta or [nome_limpo]:
@@ -1148,6 +1314,7 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
             peso = peso or linha_cache["peso_metrico"]
             altura = altura or linha_cache["altura_metrica"]
             origem = "TheDogAPI"
+            fonte_cadastro = "dogapi_cache"
 
             with obter_conexao_banco() as conexao:
                 salvar_raca_externa(
@@ -1167,6 +1334,7 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
                 peso = peso or normalizar_texto((resultado_api.get("weight") or {}).get("metric"))
                 altura = altura or normalizar_texto((resultado_api.get("height") or {}).get("metric"))
                 origem = "TheDogAPI"
+                fonte_cadastro = "dogapi_on_demand"
 
     grupo_final = grupo or "Nao informado"
     temperamento_final = temperamento or "Nao informado"
@@ -1191,6 +1359,12 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
     if linha_externa:
         resposta.update(montar_resposta_info_raca(nome_limpo, linha_externa, origem))
         resposta["mensagem"] = "Raca cadastrada na base local com sucesso."
+    logger.info(
+        "Raca cadastro | src=%s | nome=%s | ext=%s",
+        fonte_cadastro,
+        nome_limpo,
+        resposta["nomeExterno"],
+    )
     return resposta
 
 
@@ -1198,8 +1372,8 @@ def consultar_info_raca(nome: str) -> dict:
     nome_limpo = nome.strip()
     candidatos_consulta = gerar_candidatos_consulta_externa(nome_limpo)
     nome_consulta_externa = candidatos_consulta[0] if candidatos_consulta else nome_limpo
-    logger.info(
-        "RACA consulta recebida nome_original='%s' nome_limpo='%s' nome_externo='%s' candidatos='%s' chave_normalizada='%s'",
+    logger.debug(
+        "Raca consulta -> nome=%s | limpo=%s | ext=%s | candidatos=%s | chave=%s",
         nome,
         nome_limpo,
         nome_consulta_externa,
@@ -1207,7 +1381,7 @@ def consultar_info_raca(nome: str) -> dict:
         normalizar_chave_raca(nome_limpo),
     )
     if len(nome_limpo) < 2:
-        logger.warning("RACA consulta rejeitada nome_original='%s' motivo='nome_curto'", nome)
+        logger.warning("Raca rejeitada | nome=%s | motivo=curto", nome)
         raise HTTPException(
             status_code=400,
             detail="Nome da raca deve ter pelo menos 2 caracteres.",
@@ -1219,13 +1393,18 @@ def consultar_info_raca(nome: str) -> dict:
         if linha_local is not None:
             break
     if linha_local and linha_possui_dados_uteis(linha_local):
-        registrar_evento_consulta(nome_limpo, None)
+        registrar_evento_consulta(nome_limpo, None, "local")
         logger.info(
-            "RACA consulta concluida fonte='local' nome='%s' nome_externo='%s'",
+            "Raca | src=local | nome=%s | ext=%s",
             nome_limpo,
             linha_local["nome"],
         )
         return montar_resposta_info_raca(nome_limpo, linha_local, linha_local["origem"])
+    logger.debug(
+        "Raca miss | src=local | nome=%s | candidatos=%s",
+        nome_limpo,
+        candidatos_consulta,
+    )
 
     linha = None
     for candidato in candidatos_consulta or [nome_limpo]:
@@ -1233,14 +1412,18 @@ def consultar_info_raca(nome: str) -> dict:
         if linha is not None:
             break
     if linha:
-        registrar_evento_consulta(nome_limpo, linha["id_raca"])
+        registrar_evento_consulta(nome_limpo, linha["id_raca"], "raca_externa")
         logger.info(
-            "RACA consulta concluida fonte='cache_externo' nome='%s' nome_externo='%s' race_id='%s'",
+            "Raca | src=raca_externa | nome=%s | ext=%s | id=%s",
             nome_limpo,
             linha["nome"],
             linha["id_raca"],
         )
         return montar_resposta_info_raca(nome_limpo, linha, linha["origem"])
+    logger.debug(
+        "Raca miss | src=raca_externa | nome=%s",
+        nome_limpo,
+    )
 
     linha_cache = None
     for candidato in candidatos_consulta or [nome_limpo]:
@@ -1254,16 +1437,22 @@ def consultar_info_raca(nome: str) -> dict:
                 montar_dados_raca_externa_da_linha(linha_cache),
             )
 
-        registrar_evento_consulta(nome_limpo, linha_cache["id_raca"])
+        registrar_evento_consulta(nome_limpo, linha_cache["id_raca"], "dogapi_cache")
         logger.info(
-            "RACA consulta concluida fonte='dogapi_cache' nome='%s' nome_externo='%s' race_id='%s'",
+            "Raca | src=dogapi_cache | nome=%s | ext=%s | id=%s",
             nome_limpo,
             linha_cache["nome"],
             linha_cache["id_raca"],
         )
         return montar_resposta_info_raca(nome_limpo, linha_cache, linha_cache["origem"])
+    logger.debug("Raca miss | src=dogapi_cache | nome=%s", nome_limpo)
 
     resultado_api = None
+    logger.info(
+        "Raca | src=dogapi_on_demand | nome=%s | candidatos=%s",
+        nome_limpo,
+        candidatos_consulta or [nome_consulta_externa],
+    )
     for candidato in candidatos_consulta or [nome_consulta_externa]:
         resultado_api = buscar_no_dogapi_por_nome(candidato)
         if resultado_api:
@@ -1279,9 +1468,9 @@ def consultar_info_raca(nome: str) -> dict:
         with obter_conexao_banco() as conexao:
             salvar_raca_local(conexao, nome_limpo, grupo, temperamento, expectativa, peso, altura, "TheDogAPI")
 
-        registrar_evento_consulta(nome_limpo, resultado_api.get("id"))
+        registrar_evento_consulta(nome_limpo, resultado_api.get("id"), "dogapi_on_demand")
         logger.info(
-            "RACA consulta concluida fonte='dogapi_on_demand' nome='%s' nome_externo='%s' race_id='%s'",
+            "Raca | src=dogapi_on_demand | nome=%s | ext=%s | id=%s",
             nome_limpo,
             nome_api,
             resultado_api.get("id"),
@@ -1293,17 +1482,17 @@ def consultar_info_raca(nome: str) -> dict:
         )
 
     if linha_local:
-        registrar_evento_consulta(nome_limpo, None)
+        registrar_evento_consulta(nome_limpo, None, "local_sem_enriquecimento")
         logger.info(
-            "RACA consulta concluida fonte='local_sem_enriquecimento' nome='%s' nome_externo='%s'",
+            "Raca | src=local_sem_enriquecimento | nome=%s | ext=%s",
             nome_limpo,
             linha_local["nome"],
         )
         return montar_resposta_info_raca(nome_limpo, linha_local, linha_local["origem"])
 
-    registrar_evento_consulta(nome_limpo, None)
+    registrar_evento_consulta(nome_limpo, None, "nao_encontrada")
     logger.warning(
-        "RACA consulta sem resultado nome='%s' nome_externo='%s' chave_normalizada='%s'",
+        "Raca miss | src=final | nome=%s | ext=%s | chave=%s",
         nome_limpo,
         nome_consulta_externa,
         normalizar_chave_raca(nome_limpo),
