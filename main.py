@@ -31,6 +31,7 @@ logger = logging.getLogger("eleve.data_service")
 logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
 
 RACA_DE_PARA = {
+    "foxhound americano": "American Foxhound",
     "lulu da pomerania": "Pomeranian",
     "spitz alemao anao": "Pomeranian",
     "spitz alemao": "Pomeranian",
@@ -55,6 +56,92 @@ RACA_DE_PARA = {
     "rottweiler": "Rottweiler",
     "husky siberiano": "Siberian Husky",
     "doberman": "Doberman Pinscher",
+}
+PALAVRAS_IGNORADAS_RACA = {"de", "da", "do", "das", "dos", "e"}
+TOKENS_TRADUZIDOS_RACA = {
+    "americano": "American",
+    "americana": "American",
+    "ingles": "English",
+    "inglesa": "English",
+    "frances": "French",
+    "francesa": "French",
+    "alemao": "German",
+    "alema": "German",
+    "australiano": "Australian",
+    "australiana": "Australian",
+    "siberiano": "Siberian",
+    "siberiana": "Siberian",
+    "japones": "Japanese",
+    "japonesa": "Japanese",
+    "chines": "Chinese",
+    "chinesa": "Chinese",
+    "tibetano": "Tibetan",
+    "tibetana": "Tibetan",
+    "russo": "Russian",
+    "russa": "Russian",
+    "escoces": "Scottish",
+    "escocesa": "Scottish",
+    "gales": "Welsh",
+    "italiano": "Italian",
+    "italiana": "Italian",
+    "belga": "Belgian",
+    "irlandes": "Irish",
+    "irlandesa": "Irish",
+    "espanhol": "Spanish",
+    "espanhola": "Spanish",
+    "finlandes": "Finnish",
+    "finlandesa": "Finnish",
+    "sueco": "Swedish",
+    "sueca": "Swedish",
+    "noruegues": "Norwegian",
+    "norueguesa": "Norwegian",
+    "holandes": "Dutch",
+    "holandesa": "Dutch",
+    "foxhound": "Foxhound",
+    "bulldogue": "Bulldog",
+    "bulldog": "Bulldog",
+    "retriever": "Retriever",
+    "spaniel": "Spaniel",
+    "terrier": "Terrier",
+    "pastor": "Shepherd",
+    "shepherd": "Shepherd",
+    "collie": "Collie",
+    "corgi": "Corgi",
+    "mastiff": "Mastiff",
+    "pinscher": "Pinscher",
+    "husky": "Husky",
+    "schnauzer": "Schnauzer",
+    "poodle": "Poodle",
+    "spitz": "Spitz",
+    "setter": "Setter",
+    "hound": "Hound",
+    "boxer": "Boxer",
+    "beagle": "Beagle",
+    "pug": "Pug",
+    "rottweiler": "Rottweiler",
+    "pomeranian": "Pomeranian",
+}
+ADJETIVOS_NACIONALIDADE_RACA = {
+    "American",
+    "English",
+    "French",
+    "German",
+    "Australian",
+    "Siberian",
+    "Japanese",
+    "Chinese",
+    "Tibetan",
+    "Russian",
+    "Scottish",
+    "Welsh",
+    "Italian",
+    "Belgian",
+    "Irish",
+    "Spanish",
+    "Finnish",
+    "Swedish",
+    "Norwegian",
+    "Dutch",
 }
 
 app = FastAPI(title="Dados Externos - Eleve", version="1.0.0")
@@ -232,10 +319,65 @@ def normalizar_chave_raca(valor: Optional[str]) -> str:
 
 
 def traduzir_raca_para_consulta_externa(nome: str) -> str:
+    candidatos = gerar_candidatos_consulta_externa(nome)
+    return candidatos[0] if candidatos else ""
+
+
+def capitalizar_palavra(nome: str) -> str:
+    texto = str(nome or "").strip()
+    if not texto:
+        return ""
+    return texto[:1].upper() + texto[1:].lower()
+
+
+def montar_candidato_heuristico(nome: str) -> str:
     nome_limpo = str(nome or "").strip()
     if not nome_limpo:
         return ""
-    return RACA_DE_PARA.get(normalizar_chave_raca(nome_limpo), nome_limpo)
+
+    tokens = [
+        token
+        for token in normalizar_chave_raca(nome_limpo).split(" ")
+        if token and token not in PALAVRAS_IGNORADAS_RACA
+    ]
+
+    if not tokens:
+        return ""
+
+    tokens_traduzidos = [
+        TOKENS_TRADUZIDOS_RACA.get(token, capitalizar_palavra(token))
+        for token in tokens
+    ]
+
+    ultimo = tokens_traduzidos[-1]
+    if ultimo in ADJETIVOS_NACIONALIDADE_RACA and len(tokens_traduzidos) > 1:
+        return " ".join([ultimo, *tokens_traduzidos[:-1]])
+
+    return " ".join(tokens_traduzidos)
+
+
+def gerar_candidatos_consulta_externa(nome: str) -> list[str]:
+    nome_limpo = str(nome or "").strip()
+    if not nome_limpo:
+        return []
+
+    candidatos: list[str] = []
+    vistos: set[str] = set()
+
+    def adicionar(valor: Optional[str]) -> None:
+        texto = str(valor or "").strip()
+        if not texto:
+            return
+        chave = texto.lower()
+        if chave in vistos:
+            return
+        vistos.add(chave)
+        candidatos.append(texto)
+
+    adicionar(RACA_DE_PARA.get(normalizar_chave_raca(nome_limpo)))
+    adicionar(montar_candidato_heuristico(nome_limpo))
+    adicionar(nome_limpo)
+    return candidatos
 
 
 def obter_chave_canonica_raca(nome: str) -> str:
@@ -454,6 +596,31 @@ def buscar_no_dogapi_por_nome(nome: str) -> Optional[dict]:
         return None
 
 
+def contar_racas_externas() -> int:
+    with obter_conexao_banco() as conexao:
+        return conexao.execute(
+            "SELECT COUNT(*) AS total FROM racas_externas"
+        ).fetchone()["total"]
+
+
+def sincronizar_racas_iniciais_se_necessario() -> None:
+    total_racas = contar_racas_externas()
+    if total_racas > 0:
+        logger.info("STARTUP base externa ja populada total_racas=%s", total_racas)
+        return
+
+    logger.info("STARTUP base externa vazia. iniciando sincronizacao completa de racas")
+    try:
+        resultado = executar_sincronizacao_etl()
+        logger.info(
+            "STARTUP sincronizacao concluida status=%s total_registros=%s",
+            resultado.get("status"),
+            resultado.get("totalRegistros"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("STARTUP sincronizacao inicial falhou detalhe='%s'", exc)
+
+
 def registrar_evento_consulta(nome: str, id_raca: Optional[int]) -> None:
     with obter_conexao_banco() as conexao:
         conexao.execute(
@@ -525,6 +692,7 @@ def executar_sincronizacao_etl() -> dict:
 @app.on_event("startup")
 def iniciar_aplicacao() -> None:
     inicializar_banco()
+    sincronizar_racas_iniciais_se_necessario()
 
     scheduler.add_job(
         executar_sincronizacao_etl,
@@ -561,7 +729,8 @@ def sincronizar_racas() -> dict:
 def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
     """Registra uma raça na base local. Enriquece com TheDogAPI se disponível."""
     nome_limpo = dados.nome.strip()
-    nome_consulta_externa = traduzir_raca_para_consulta_externa(nome_limpo)
+    candidatos_consulta = gerar_candidatos_consulta_externa(nome_limpo)
+    nome_consulta_externa = candidatos_consulta[0] if candidatos_consulta else nome_limpo
     if len(nome_limpo) < 2:
         raise HTTPException(
             status_code=400,
@@ -589,9 +758,11 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
     altura = dados.altura
     origem = "usuario"
 
-    linha_externa = buscar_raca_por_nome(nome_limpo)
-    if linha_externa is None and nome_consulta_externa != nome_limpo:
-        linha_externa = buscar_raca_por_nome(nome_consulta_externa)
+    linha_externa = None
+    for candidato in candidatos_consulta or [nome_limpo]:
+        linha_externa = buscar_raca_por_nome(candidato)
+        if linha_externa is not None:
+            break
 
     if linha_externa:
         grupo = grupo or linha_externa["grupo"]
@@ -601,7 +772,11 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
         altura = altura or linha_externa["altura_metrica"]
         origem = "TheDogAPI"
     else:
-        resultado_api = buscar_no_dogapi_por_nome(nome_consulta_externa)
+        resultado_api = None
+        for candidato in candidatos_consulta or [nome_consulta_externa]:
+            resultado_api = buscar_no_dogapi_por_nome(candidato)
+            if resultado_api:
+                break
         if resultado_api:
             grupo = grupo or normalizar_texto(resultado_api.get("breed_group"))
             temperamento = temperamento or normalizar_texto(resultado_api.get("temperament"))
@@ -634,12 +809,14 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
 
 def consultar_info_raca(nome: str) -> dict:
     nome_limpo = nome.strip()
-    nome_consulta_externa = traduzir_raca_para_consulta_externa(nome_limpo)
+    candidatos_consulta = gerar_candidatos_consulta_externa(nome_limpo)
+    nome_consulta_externa = candidatos_consulta[0] if candidatos_consulta else nome_limpo
     logger.info(
-        "RACA consulta recebida nome_original='%s' nome_limpo='%s' nome_externo='%s' chave_normalizada='%s'",
+        "RACA consulta recebida nome_original='%s' nome_limpo='%s' nome_externo='%s' candidatos='%s' chave_normalizada='%s'",
         nome,
         nome_limpo,
         nome_consulta_externa,
+        candidatos_consulta,
         normalizar_chave_raca(nome_limpo),
     )
     if len(nome_limpo) < 2:
@@ -649,9 +826,11 @@ def consultar_info_raca(nome: str) -> dict:
             detail="Nome da raca deve ter pelo menos 2 caracteres.",
         )
 
-    linha_local = buscar_raca_local_por_nome(nome_limpo)
-    if linha_local is None and nome_consulta_externa != nome_limpo:
-        linha_local = buscar_raca_local_por_nome(nome_consulta_externa)
+    linha_local = None
+    for candidato in candidatos_consulta or [nome_limpo]:
+        linha_local = buscar_raca_local_por_nome(candidato)
+        if linha_local is not None:
+            break
     if linha_local and linha_possui_dados_uteis(linha_local):
         registrar_evento_consulta(nome_limpo, None)
         logger.info(
@@ -670,9 +849,11 @@ def consultar_info_raca(nome: str) -> dict:
             "fonte": linha_local["origem"],
         }
 
-    linha = buscar_raca_por_nome(nome_limpo)
-    if linha is None and nome_consulta_externa != nome_limpo:
-        linha = buscar_raca_por_nome(nome_consulta_externa)
+    linha = None
+    for candidato in candidatos_consulta or [nome_limpo]:
+        linha = buscar_raca_por_nome(candidato)
+        if linha is not None:
+            break
     if linha:
         registrar_evento_consulta(nome_limpo, linha["id_raca"])
         logger.info(
@@ -693,7 +874,11 @@ def consultar_info_raca(nome: str) -> dict:
             "raceId": linha["id_raca"],
         }
 
-    resultado_api = buscar_no_dogapi_por_nome(nome_consulta_externa)
+    resultado_api = None
+    for candidato in candidatos_consulta or [nome_consulta_externa]:
+        resultado_api = buscar_no_dogapi_por_nome(candidato)
+        if resultado_api:
+            break
     if resultado_api:
         grupo = normalizar_texto(resultado_api.get("breed_group"))
         temperamento = normalizar_texto(resultado_api.get("temperament"))
