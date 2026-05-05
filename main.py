@@ -168,6 +168,16 @@ ADJETIVOS_NACIONALIDADE_RACA = {
     "Norwegian",
     "Dutch",
 }
+RACAS_NAO_CATALOGADAS = {
+    "indefinida",
+    "indefinido",
+    "misto",
+    "mistura",
+    "sem raca definida",
+    "srd",
+    "vira lata",
+    "viralata",
+}
 
 app = FastAPI(title="Dados Externos - Eleve", version="1.0.0")
 
@@ -601,6 +611,10 @@ def normalizar_chave_raca(valor: Optional[str]) -> str:
     return " ".join(texto_sem_acento.split())
 
 
+def eh_raca_nao_catalogada(nome: str) -> bool:
+    return normalizar_chave_raca(nome) in RACAS_NAO_CATALOGADAS
+
+
 def traduzir_raca_para_consulta_externa(nome: str) -> str:
     candidatos = gerar_candidatos_consulta_externa(nome)
     return candidatos[0] if candidatos else ""
@@ -849,6 +863,29 @@ def montar_resposta_info_raca(nome_consultado: str, linha, fonte_padrao: str) ->
         "descricao": normalizar_texto(obter_valor_coluna(linha, "descricao")),
         "fonte": normalizar_texto(obter_valor_coluna(linha, "origem"), padrao=fonte_padrao),
         "raceId": race_id,
+    }
+
+
+def montar_resposta_raca_nao_catalogada(nome_consultado: str) -> dict:
+    return {
+        "nome": nome_consultado,
+        "nomeExterno": "Sem raca definida",
+        "grupo": "Misto",
+        "temperamento": "Nao informado",
+        "expectativaVida": "Nao informado",
+        "peso": "Nao informado",
+        "pesoImperial": "Nao informado",
+        "altura": "Nao informado",
+        "alturaImperial": "Nao informado",
+        "origemRaca": "Nao catalogada",
+        "proposito": "Companhia",
+        "referenciaImagemId": "Nao informado",
+        "imagemUrl": "Nao informado",
+        "descricao": (
+            "Identificacao inconclusiva pela IA ou animal sem raca definida."
+        ),
+        "fonte": "nao_catalogada",
+        "raceId": None,
     }
 
 
@@ -1267,6 +1304,24 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
             detail="Nome da raca deve ter pelo menos 2 caracteres.",
         )
 
+    if eh_raca_nao_catalogada(nome_limpo):
+        with obter_conexao_banco() as conexao:
+            salvar_raca_local(
+                conexao,
+                nome_limpo,
+                "Misto",
+                "Nao informado",
+                "Nao informado",
+                "Nao informado",
+                "Nao informado",
+                "nao_catalogada",
+            )
+        logger.info("Raca cadastro | src=nao_catalogada | nome=%s", nome_limpo)
+        return {
+            "mensagem": "Categoria local cadastrada com sucesso.",
+            **montar_resposta_raca_nao_catalogada(nome_limpo),
+        }
+
     linha_local = buscar_raca_local_por_nome(nome_limpo)
     if linha_local and linha_possui_dados_uteis(linha_local):
         resposta = montar_resposta_info_raca(nome_limpo, linha_local, linha_local["origem"])
@@ -1386,6 +1441,11 @@ def consultar_info_raca(nome: str) -> dict:
             status_code=400,
             detail="Nome da raca deve ter pelo menos 2 caracteres.",
         )
+
+    if eh_raca_nao_catalogada(nome_limpo):
+        registrar_evento_consulta(nome_limpo, None, "nao_catalogada")
+        logger.info("Raca | src=nao_catalogada | nome=%s", nome_limpo)
+        return montar_resposta_raca_nao_catalogada(nome_limpo)
 
     linha_local = None
     for candidato in candidatos_consulta or [nome_limpo]:
