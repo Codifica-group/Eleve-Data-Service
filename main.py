@@ -46,6 +46,9 @@ CAMINHO_BANCO_DADOS = str(
 )
 URL_BASE_API_DOG = "https://api.thedogapi.com/v1"
 HORA_SINCRONIZACAO_UTC = int(os.getenv("HORA_SINCRONIZACAO_UTC", "3"))
+TOTAL_RACAS_MINIMO_SINCRONIZADAS = int(
+    os.getenv("TOTAL_RACAS_MINIMO_SINCRONIZADAS", "200")
+)
 
 RACA_DE_PARA = {
     "foxhound americano": "American Foxhound",
@@ -827,9 +830,16 @@ def restaurar_racas_externas_a_partir_do_cache() -> int:
 
 def sincronizar_racas_iniciais_se_necessario() -> None:
     total_racas = contar_racas_externas()
-    if total_racas > 0:
+    if total_racas >= TOTAL_RACAS_MINIMO_SINCRONIZADAS:
         logger.info("STARTUP base externa ja populada total_racas=%s", total_racas)
         return
+
+    if total_racas > 0:
+        logger.info(
+            "STARTUP base externa incompleta total_racas=%s minimo_esperado=%s",
+            total_racas,
+            TOTAL_RACAS_MINIMO_SINCRONIZADAS,
+        )
 
     total_restaurado = restaurar_racas_externas_a_partir_do_cache()
     if total_restaurado > 0:
@@ -837,9 +847,8 @@ def sincronizar_racas_iniciais_se_necessario() -> None:
             "STARTUP base externa restaurada a partir do cache local total_racas=%s",
             total_restaurado,
         )
-        return
 
-    logger.info("STARTUP base externa vazia. iniciando sincronizacao completa de racas")
+    logger.info("STARTUP base externa vazia ou incompleta. iniciando sincronizacao completa de racas")
     try:
         resultado = executar_sincronizacao_etl()
         logger.info(
