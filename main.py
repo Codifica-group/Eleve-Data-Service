@@ -1,6 +1,8 @@
 import os
 import sqlite3
 import unicodedata
+import logging
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -8,7 +10,7 @@ from typing import Optional
 import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -24,6 +26,9 @@ CAMINHO_BANCO_DADOS = os.getenv(
 )
 URL_BASE_API_DOG = "https://api.thedogapi.com/v1"
 HORA_SINCRONIZACAO_UTC = int(os.getenv("HORA_SINCRONIZACAO_UTC", "3"))
+
+logger = logging.getLogger("eleve.data_service")
+logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
 
 RACA_DE_PARA = {
     "lulu da pomerania": "Pomeranian",
@@ -72,6 +77,40 @@ class RacaCadastroRequest(BaseModel):
     expectativa_vida: Optional[str] = None
     peso: Optional[str] = None
     altura: Optional[str] = None
+
+
+@app.middleware("http")
+async def registrar_requisicoes(request: Request, call_next):
+    inicio = time.perf_counter()
+    cliente = request.client.host if request.client else "desconhecido"
+    query = str(request.url.query or "")
+
+    try:
+        response = await call_next(request)
+    except Exception as exc:  # noqa: BLE001
+        duracao_ms = round((time.perf_counter() - inicio) * 1000)
+        logger.exception(
+            "REQ falhou metodo=%s path=%s query=%s cliente=%s duracao_ms=%s detalhe=%s",
+            request.method,
+            request.url.path,
+            query or "-",
+            cliente,
+            duracao_ms,
+            exc,
+        )
+        raise
+
+    duracao_ms = round((time.perf_counter() - inicio) * 1000)
+    logger.info(
+        "REQ metodo=%s path=%s query=%s cliente=%s status=%s duracao_ms=%s",
+        request.method,
+        request.url.path,
+        query or "-",
+        cliente,
+        response.status_code,
+        duracao_ms,
+    )
+    return response
 
 
 def agora_utc_iso() -> str:
@@ -387,6 +426,7 @@ def buscar_raca_por_nome(nome: str) -> Optional[sqlite3.Row]:
 
 def buscar_no_dogapi_por_nome(nome: str) -> Optional[dict]:
     """Busca on-demand no TheDogAPI. Persiste no dogapi_cache e retorna None se não encontrado."""
+    logger.info("DOGAPI consulta iniciada nome_consulta='%s'", nome)
     try:
         resposta = requests.get(
             f"{URL_BASE_API_DOG}/breeds/search",
@@ -397,12 +437,20 @@ def buscar_no_dogapi_por_nome(nome: str) -> Optional[dict]:
         resposta.raise_for_status()
         resultados = resposta.json()
         if not resultados:
+            logger.info("DOGAPI consulta sem resultado nome_consulta='%s'", nome)
             return None
         item = resultados[0]
         with obter_conexao_banco() as conexao:
             salvar_no_cache_dogapi(conexao, item)
+        logger.info(
+            "DOGAPI consulta concluida nome_consulta='%s' nome_encontrado='%s' id='%s'",
+            nome,
+            item.get("name"),
+            item.get("id"),
+        )
         return item
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("DOGAPI consulta falhou nome_consulta='%s' detalhe='%s'", nome, exc)
         return None
 
 
@@ -584,11 +632,18 @@ def cadastrar_raca(dados: RacaCadastroRequest) -> dict:
     }
 
 
-@app.get("/racas/info/{nome}")
-def obter_info_raca(nome: str) -> dict:
+def consultar_info_raca(nome: str) -> dict:
     nome_limpo = nome.strip()
     nome_consulta_externa = traduzir_raca_para_consulta_externa(nome_limpo)
+    logger.info(
+        "RACA consulta recebida nome_original='%s' nome_limpo='%s' nome_externo='%s' chave_normalizada='%s'",
+        nome,
+        nome_limpo,
+        nome_consulta_externa,
+        normalizar_chave_raca(nome_limpo),
+    )
     if len(nome_limpo) < 2:
+        logger.warning("RACA consulta rejeitada nome_original='%s' motivo='nome_curto'", nome)
         raise HTTPException(
             status_code=400,
             detail="Nome da raca deve ter pelo menos 2 caracteres.",
@@ -599,6 +654,11 @@ def obter_info_raca(nome: str) -> dict:
         linha_local = buscar_raca_local_por_nome(nome_consulta_externa)
     if linha_local and linha_possui_dados_uteis(linha_local):
         registrar_evento_consulta(nome_limpo, None)
+        logger.info(
+            "RACA consulta concluida fonte='local' nome='%s' nome_externo='%s'",
+            nome_limpo,
+            linha_local["nome"],
+        )
         return {
             "nome": nome_limpo,
             "nomeExterno": linha_local["nome"],
@@ -615,6 +675,12 @@ def obter_info_raca(nome: str) -> dict:
         linha = buscar_raca_por_nome(nome_consulta_externa)
     if linha:
         registrar_evento_consulta(nome_limpo, linha["id_raca"])
+        logger.info(
+            "RACA consulta concluida fonte='cache_externo' nome='%s' nome_externo='%s' race_id='%s'",
+            nome_limpo,
+            linha["nome"],
+            linha["id_raca"],
+        )
         return {
             "nome": nome_limpo,
             "nomeExterno": linha["nome"],
@@ -640,6 +706,12 @@ def obter_info_raca(nome: str) -> dict:
             salvar_raca_local(conexao, nome_limpo, grupo, temperamento, expectativa, peso, altura, "TheDogAPI")
 
         registrar_evento_consulta(nome_limpo, resultado_api.get("id"))
+        logger.info(
+            "RACA consulta concluida fonte='dogapi_on_demand' nome='%s' nome_externo='%s' race_id='%s'",
+            nome_limpo,
+            nome_api,
+            resultado_api.get("id"),
+        )
         return {
             "nome": nome_limpo,
             "nomeExterno": nome_api,
@@ -654,6 +726,11 @@ def obter_info_raca(nome: str) -> dict:
 
     if linha_local:
         registrar_evento_consulta(nome_limpo, None)
+        logger.info(
+            "RACA consulta concluida fonte='local_sem_enriquecimento' nome='%s' nome_externo='%s'",
+            nome_limpo,
+            linha_local["nome"],
+        )
         return {
             "nome": nome_limpo,
             "nomeExterno": linha_local["nome"],
@@ -666,10 +743,26 @@ def obter_info_raca(nome: str) -> dict:
         }
 
     registrar_evento_consulta(nome_limpo, None)
+    logger.warning(
+        "RACA consulta sem resultado nome='%s' nome_externo='%s' chave_normalizada='%s'",
+        nome_limpo,
+        nome_consulta_externa,
+        normalizar_chave_raca(nome_limpo),
+    )
     raise HTTPException(
         status_code=404,
         detail="Raca nao encontrada na base externa local.",
     )
+
+
+@app.get("/racas/info")
+def obter_info_raca_por_query(nome: str) -> dict:
+    return consultar_info_raca(nome)
+
+
+@app.get("/racas/info/{nome}")
+def obter_info_raca_por_path(nome: str) -> dict:
+    return consultar_info_raca(nome)
 
 
 @app.get("/dogapi/cache")
